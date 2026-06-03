@@ -12,7 +12,7 @@
 // Configuration
 // ---------------------------------------------------------------------------
 
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = "https://phishguard-ai-p0qo.onrender.com";
 const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_HTML_LENGTH = 50_000;           // Limite l'envoi HTML pour éviter les timeouts
 
