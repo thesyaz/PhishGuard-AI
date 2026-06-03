@@ -84,3 +84,11 @@ class StatsResponse(BaseModel):
     low_risk_count: int = Field(..., description="Nombre de sites LOW RISK détectés")
     average_score: float = Field(..., description="Score moyen sur toutes les analyses")
     recent_history: List[HistoryEntry] = Field(default_factory=list, description="10 dernières analyses")
+
+# Ajouter dans models.py
+
+class AIResultResponse(BaseModel):
+    key: str
+    status: str          # "pending" | "done" | "error"
+    ai_summary: Optional[str] = None
+    error: Optional[str] = None
