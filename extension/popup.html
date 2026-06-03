@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhishGuard AI</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════
+       EN-TÊTE
+  ═══════════════════════════════════════════════ -->
+  <header class="header">
+    <div class="header-logo">
+      <div class="shield-icon" id="shieldIcon">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L3 7V13C3 17.97 7.02 22.61 12 24C16.98 22.61 21 17.97 21 13V7L12 2Z"
+                fill="currentColor" opacity="0.15"/>
+          <path d="M12 2L3 7V13C3 17.97 7.02 22.61 12 24C16.98 22.61 21 17.97 21 13V7L12 2Z"
+                stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M9 12L11 14L15 10" stroke="currentColor" stroke-width="1.5"
+                stroke-linecap="round" stroke-linejoin="round" id="shieldCheck"/>
+          <path d="M12 8V13M12 16V16.5" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" id="shieldAlert" style="display:none"/>
+        </svg>
+      </div>
+      <div class="header-text">
+        <span class="header-title">PhishGuard</span>
+        <span class="header-subtitle">AI Security</span>
+      </div>
+    </div>
+    <button class="settings-btn" id="settingsBtn" title="Paramètres">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════
+       CONTENU PRINCIPAL
+  ═══════════════════════════════════════════════ -->
+  <main class="main" id="mainView">
+
+    <!-- URL courante -->
+    <div class="url-bar" id="urlBar">
+      <div class="url-favicon" id="urlFavicon"></div>
+      <span class="url-text" id="urlText">Chargement...</span>
+    </div>
+
+    <!-- État de chargement -->
+    <div class="state-loading" id="stateLoading">
+      <div class="loader-ring">
+        <svg viewBox="0 0 50 50">
+          <circle cx="25" cy="25" r="20" fill="none" stroke-width="4"/>
+        </svg>
+      </div>
+      <p class="loading-text">Analyse en cours...</p>
+      <p class="loading-sub">Vérification heuristique et IA</p>
+    </div>
+
+    <!-- État d'erreur -->
+    <div class="state-error" id="stateError" style="display:none">
+      <div class="error-icon">⚠</div>
+      <p class="error-title">Backend non disponible</p>
+      <p class="error-sub">Assurez-vous que le serveur Python est démarré sur le port 8000.</p>
+      <button class="btn-retry" id="retryBtn">Réessayer</button>
+    </div>
+
+    <!-- Résultat d'analyse -->
+    <div class="state-result" id="stateResult" style="display:none">
+
+      <!-- Jauge de score -->
+      <div class="score-section">
+        <div class="score-gauge" id="scoreGauge">
+          <svg viewBox="0 0 120 70" class="gauge-svg">
+            <!-- Fond de la jauge -->
+            <path d="M 10 60 A 50 50 0 0 1 110 60"
+                  fill="none" stroke="var(--gauge-bg)" stroke-width="10"
+                  stroke-linecap="round"/>
+            <!-- Arc de progression -->
+            <path id="gaugeArc" d="M 10 60 A 50 50 0 0 1 110 60"
+                  fill="none" stroke="var(--gauge-color)" stroke-width="10"
+                  stroke-linecap="round"
+                  stroke-dasharray="157"
+                  stroke-dashoffset="157"/>
+          </svg>
+          <div class="score-display">
+            <span class="score-number" id="scoreNumber">--</span>
+            <span class="score-label">/100</span>
+          </div>
+        </div>
+
+        <!-- Badge de risque -->
+        <div class="risk-badge" id="riskBadge">
+          <span class="risk-dot" id="riskDot"></span>
+          <span class="risk-text" id="riskText">Analyse...</span>
+        </div>
+      </div>
+
+      <!-- Séparateur -->
+      <div class="divider"></div>
+
+      <!-- Résumé IA (si disponible) -->
+      <div class="ai-summary" id="aiSummary" style="display:none">
+        <div class="ai-label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
+            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/>
+            <path d="M12 6v6l4 2"/>
+          </svg>
+          Analyse IA
+        </div>
+        <p class="ai-text" id="aiText"></p>
+      </div>
+
+      <!-- Liste des raisons -->
+      <div class="reasons-section">
+        <h3 class="reasons-title">Indicateurs détectés</h3>
+        <ul class="reasons-list" id="reasonsList"></ul>
+      </div>
+
+      <!-- Bouton nouvelle analyse -->
+      <button class="btn-analyze" id="analyzeBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+        Relancer l'analyse
+      </button>
+    </div>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════════
+       VUE HISTORIQUE
+  ═══════════════════════════════════════════════ -->
+  <div class="history-view" id="historyView" style="display:none">
+    <div class="history-header">
+      <h2>Historique</h2>
+      <button class="btn-clear-history" id="clearHistoryBtn">Effacer</button>
+    </div>
+    <div class="stats-row" id="statsRow">
+      <div class="stat-item" id="statTotal">
+        <span class="stat-num">0</span>
+        <span class="stat-lbl">Total</span>
+      </div>
+      <div class="stat-item high">
+        <span class="stat-num" id="statHigh">0</span>
+        <span class="stat-lbl">Élevé</span>
+      </div>
+      <div class="stat-item medium">
+        <span class="stat-num" id="statMedium">0</span>
+        <span class="stat-lbl">Moyen</span>
+      </div>
+      <div class="stat-item low">
+        <span class="stat-num" id="statLow">0</span>
+        <span class="stat-lbl">Faible</span>
+      </div>
+    </div>
+    <ul class="history-list" id="historyList"></ul>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════
+       NAVIGATION BAS
+  ═══════════════════════════════════════════════ -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" id="navAnalysis" data-view="main">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
+        <path d="M12 2L3 7V13C3 17.97 7.02 22.61 12 24C16.98 22.61 21 17.97 21 13V7L12 2Z"/>
+      </svg>
+      <span>Analyse</span>
+    </button>
+    <button class="nav-btn" id="navHistory" data-view="history">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20">
+        <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <span>Historique</span>
+    </button>
+  </nav>
+
+  <script src="popup.js"></script>
+</body>
+</html>
