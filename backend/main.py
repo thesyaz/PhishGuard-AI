@@ -156,16 +156,7 @@ async def analyze_url(request: AnalyzeRequest) -> AnalyzeResponse:
         reasons = ["Aucun indicateur de phishing détecté. La page semble légitime."]
 
     # 4. Analyse IA (asynchrone, non bloquante si désactivée)
-    ai_summary: Optional[str] = None
-    try:
-        ai_summary = await get_ai_summary(
-            url=request.url,
-            title=request.title,
-            heuristic_reasons=reasons,
-            score=score,
-        )
-    except Exception as e:
-        logger.warning(f"Analyse IA échouée (non critique) : {e}")
+ai_summary = None
 
     # 5. Mise à jour de l'historique et des stats
     _update_state(request.url, request.title, score, risk)
