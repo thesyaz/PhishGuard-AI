@@ -31,7 +31,10 @@ from models import (
 from analyzer import HeuristicAnalyzer, score_to_risk, get_human_reasons
 from ai_analyzer import get_ai_summary, get_ai_mode
 from blacklist import get_blacklist_stats, reload_blacklist
-
+# Ajouter après vos imports existants
+from fastapi import BackgroundTasks
+from ai_cache import ai_cache, AIResultCache
+from models import AIResultResponse  # si pas déjà importé
 
 # ---------------------------------------------------------------------------
 # Configuration du logging
