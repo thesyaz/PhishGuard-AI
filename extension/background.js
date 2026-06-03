@@ -74,7 +74,7 @@ async function callAnalyzeAPI(url, title, htmlContent) {
     html_content: htmlContent ? htmlContent.substring(0, MAX_HTML_LENGTH) : null,
   };
 
-  const response = await fetch(`${API_BASE_URL}/analyze`, {
+  const response = await fetch("/analyze"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
