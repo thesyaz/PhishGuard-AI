@@ -12,477 +12,309 @@
  *  - Vérification de santé du backend avant chaque analyse
  *  - Aucun crash du service worker (toutes les erreurs sont interceptées)
  */
+/**
+ * PhishGuard AI — Background Service Worker V2 (CLEAN)
+ */
 
 "use strict";
 
 // ---------------------------------------------------------------------------
-// Configuration
+// CONFIG
 // ---------------------------------------------------------------------------
 
-/** URL de base du backend Render (production). */
 const API_BASE_URL = "https://phishguard-ai-p0qo.onrender.com";
-
-/** Durée de validité du cache mémoire : 5 minutes. */
 const CACHE_DURATION_MS = 5 * 60 * 1000;
+const CACHE_MAX_SIZE = 100;
+const FETCH_TIMEOUT_MS = 8000;
+const MAX_HTML_LENGTH = 30000;
 
-/** Taille maximale du HTML envoyé au backend pour éviter les timeouts. */
-const MAX_HTML_LENGTH = 50_000;
-
-/** Timeout réseau pour les appels fetch (millisecondes). */
-const FETCH_TIMEOUT_MS = 10_000;
-
-/** Nombre maximum d'entrées dans le cache mémoire. */
-const CACHE_MAX_SIZE = 50;
-
-/** Nombre maximum d'entrées dans l'historique local Chrome. */
-const HISTORY_MAX_SIZE = 50;
-
-/**
- * Cache mémoire des résultats d'analyse.
- * Clé : URL (string) → Valeur : { result: Object, timestamp: number }
- */
 const analysisCache = new Map();
 
-/**
- * Préfixes d'URL à ignorer systématiquement (pages système non analysables).
- */
-const IGNORED_URL_PREFIXES = [
-  "chrome://",
-  "chrome-extension://",
-  "edge://",
-  "about:",
-  "moz-extension://",
-];
-
-
 // ---------------------------------------------------------------------------
-// Utilitaires
+// TRUSTED DOMAINS
 // ---------------------------------------------------------------------------
 
-/**
- * Détermine si une URL doit être ignorée (page système, extension, etc.).
- * @param {string|undefined} url
- * @returns {boolean}
- */
+const TRUSTED_DOMAINS = new Set([
+  "google.com","google.fr","youtube.com","microsoft.com","apple.com",
+  "amazon.com","facebook.com","instagram.com","whatsapp.com",
+  "github.com","gitlab.com","stackoverflow.com",
+  "openai.com","anthropic.com","claude.ai",
+  "paypal.com","stripe.com",
+  "wikipedia.org","reddit.com","linkedin.com"
+]);
+
+const URL_SHORTENERS = new Set([
+  "bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd"
+]);
+
+const SUSPICIOUS_TLDS = new Set([
+  ".tk",".ml",".ga",".cf",".xyz",".top",".click",".icu"
+]);
+
+const KNOWN_BRANDS = ["paypal","google","apple","microsoft","amazon"];
+
+// ---------------------------------------------------------------------------
+// UTILS
+// ---------------------------------------------------------------------------
+
 function isIgnoredUrl(url) {
-  if (!url || typeof url !== "string") return true;
-  return IGNORED_URL_PREFIXES.some((prefix) => url.startsWith(prefix));
+  return !url || url.startsWith("chrome://") || url.startsWith("chrome-extension://");
 }
 
-/**
- * Effectue un fetch avec un timeout automatique.
- * Lève une erreur si la réponse dépasse FETCH_TIMEOUT_MS.
- * @param {string} url
- * @param {RequestInit} options
- * @returns {Promise<Response>}
- */
-async function fetchWithTimeout(url, options = {}) {
+function getRootDomain(hostname) {
+  const parts = hostname.replace(/^www\./, "").split(".");
+  return parts.length > 2 ? parts.slice(-2).join(".") : hostname;
+}
+
+function isTrustedDomain(hostname) {
+  const clean = hostname.replace(/^www\./, "").toLowerCase();
+  return TRUSTED_DOMAINS.has(clean) || TRUSTED_DOMAINS.has(getRootDomain(clean));
+}
+
+async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timerId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
+  const t = setTimeout(() => controller.abort(), timeout);
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    return response;
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
-    clearTimeout(timerId);
+    clearTimeout(t);
   }
 }
-
-/**
- * Vérifie que l'onglet avec l'identifiant donné existe toujours.
- * @param {number} tabId
- * @returns {Promise<chrome.tabs.Tab|null>} L'objet Tab, ou null si absent.
- */
-async function safeGetTab(tabId) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    return tab;
-  } catch (_) {
-    // L'onglet a été fermé ou n'existe plus — c'est un cas normal.
-    console.log(`[PhishGuard] Onglet ${tabId} introuvable (probablement fermé).`);
-    return null;
-  }
-}
-
-/**
- * Vérifie que le backend est accessible via GET /health.
- * @returns {Promise<boolean>}
- */
-async function isBackendHealthy() {
-  try {
-    const response = await fetchWithTimeout(`${API_BASE_URL}/health`);
-    if (response.ok) {
-      console.log("[PhishGuard] Backend accessible — santé OK.");
-      return true;
-    }
-    console.warn(`[PhishGuard] Backend inaccessible — statut HTTP ${response.status}.`);
-    return false;
-  } catch (error) {
-    if (error.name === "AbortError") {
-      console.warn("[PhishGuard] Backend inaccessible — timeout GET /health.");
-    } else {
-      console.warn("[PhishGuard] Backend inaccessible — erreur réseau :", error.message);
-    }
-    return false;
-  }
-}
-
 
 // ---------------------------------------------------------------------------
-// Gestion du badge
+// HEURISTICS (FAST LOCAL ENGINE)
 // ---------------------------------------------------------------------------
 
-/**
- * Met à jour le badge de l'extension selon le niveau de risque.
- * Vérifie d'abord que l'onglet existe pour éviter "No tab with id".
- * @param {number} tabId
- * @param {string} risk — "HIGH" | "MEDIUM" | "LOW"
- * @param {number} score — Score de 0 à 100
- */
+function runLocalHeuristics(url) {
+  let score = 0;
+  const reasons = [];
+
+  let parsed;
+  try { parsed = new URL(url); } catch { return { score: 0, reasons: [] }; }
+
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+  const full = url.toLowerCase();
+  const root = getRootDomain(host);
+
+  if (isTrustedDomain(host)) {
+    return { score: 0, reasons: ["Trusted domain"] };
+  }
+
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    score += 25;
+    reasons.push("IP address used instead of domain");
+  }
+
+  if (URL_SHORTENERS.has(host) || URL_SHORTENERS.has(root)) {
+    score += 20;
+    reasons.push("URL shortener detected");
+  }
+
+  const tld = host.match(/\.[^.]+$/)?.[0];
+  if (tld && SUSPICIOUS_TLDS.has(tld)) {
+    score += 15;
+    reasons.push(`Suspicious TLD ${tld}`);
+  }
+
+  if (url.includes("@")) {
+    score += 20;
+    reasons.push("URL contains @ trick");
+  }
+
+  const sub = host.split(".").length - 2;
+  if (sub > 3) {
+    score += 15;
+    reasons.push("Too many subdomains");
+  }
+
+  if (parsed.protocol === "http:") {
+    score += 10;
+    reasons.push("No HTTPS");
+  }
+
+  if (host !== host.normalize("NFC")) {
+    score += 15;
+    reasons.push("Unicode domain suspicious");
+  }
+
+  const found = KNOWN_BRANDS.filter(b => full.includes(b));
+  if (found.length) {
+    score += 20;
+    reasons.push("Brand impersonation: " + found[0]);
+  }
+
+  if (url.length > 100) {
+    score += 10;
+    reasons.push("Very long URL");
+  }
+
+  if (path.includes("//")) {
+    score += 10;
+    reasons.push("Double slash in path");
+  }
+
+  return { score: Math.min(100, score), reasons };
+}
+
+// ---------------------------------------------------------------------------
+// BADGE
+// ---------------------------------------------------------------------------
+
 async function updateBadge(tabId, risk, score) {
-  const tab = await safeGetTab(tabId);
-  if (!tab) return; // L'onglet a disparu entre-temps
-
-  const configs = {
-    HIGH:   { text: "!", color: "#EF4444" }, // Rouge
-    MEDIUM: { text: "?", color: "#F59E0B" }, // Orange
-    LOW:    { text: "✓", color: "#10B981" }, // Vert
-  };
-
-  const cfg = configs[risk] || configs.LOW;
+  const cfg = {
+    HIGH: { text: "!", color: "#EF4444" },
+    MEDIUM: { text: "?", color: "#F59E0B" },
+    LOW: { text: "✓", color: "#10B981" }
+  }[risk] || { text: "✓", color: "#10B981" };
 
   try {
     chrome.action.setBadgeText({ tabId, text: cfg.text });
     chrome.action.setBadgeBackgroundColor({ tabId, color: cfg.color });
-    chrome.action.setTitle({
-      tabId,
-      title: `PhishGuard AI — Risque ${risk} (score : ${score}/100)`,
-    });
-  } catch (error) {
-    console.warn(`[PhishGuard] Impossible de mettre à jour le badge de l'onglet ${tabId} :`, error.message);
-  }
+  } catch {}
 }
 
-/**
- * Remet le badge à son état neutre (page en chargement ou non analysée).
- * Vérifie d'abord que l'onglet existe.
- * @param {number} tabId
- */
 async function resetBadge(tabId) {
-  const tab = await safeGetTab(tabId);
-  if (!tab) return;
-
   try {
     chrome.action.setBadgeText({ tabId, text: "" });
-    chrome.action.setTitle({ tabId, title: "PhishGuard AI — Cliquez pour analyser" });
-  } catch (error) {
-    console.warn(`[PhishGuard] Impossible de réinitialiser le badge de l'onglet ${tabId} :`, error.message);
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// CACHE
+// ---------------------------------------------------------------------------
+
+function cacheResult(url, result) {
+  analysisCache.set(url, { result, timestamp: Date.now() });
+  if (analysisCache.size > CACHE_MAX_SIZE) {
+    const first = analysisCache.keys().next().value;
+    if (first) analysisCache.delete(first);
   }
 }
 
-
 // ---------------------------------------------------------------------------
-// Appel API backend
+// BACKEND
 // ---------------------------------------------------------------------------
 
-/**
- * Envoie une requête POST /analyze au backend Python.
- * @param {string} url — URL de la page à analyser
- * @param {string|null} title — Titre de la page
- * @param {string|null} htmlContent — HTML brut de la page (tronqué)
- * @returns {Promise<Object>} — Réponse JSON du backend
- */
-async function callAnalyzeAPI(url, title, htmlContent) {
-  const payload = {
-    url,
-    title: title || null,
-    html_content: htmlContent
-      ? htmlContent.substring(0, MAX_HTML_LENGTH)
-      : null,
-  };
-
-  const response = await fetchWithTimeout(`${API_BASE_URL}/analyze`, {
+async function callBackend(url, title, html) {
+  const res = await fetchWithTimeout(`${API_BASE_URL}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      url,
+      title: title || null,
+      html_content: html ? html.slice(0, MAX_HTML_LENGTH) : null
+    })
   });
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "(corps illisible)");
-    throw new Error(`API ${response.status}: ${errorText}`);
-  }
-
-  return response.json();
+  if (!res.ok) throw new Error("Backend error");
+  return res.json();
 }
 
-
 // ---------------------------------------------------------------------------
-// Extraction HTML via content script
-// ---------------------------------------------------------------------------
-
-/**
- * Tente d'extraire le HTML de la page via executeScript.
- * Retourne null en cas d'échec (PDF, page protégée, extension, etc.).
- * @param {number} tabId
- * @returns {Promise<string|null>}
- */
-async function extractPageHtml(tabId) {
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => document.documentElement.outerHTML,
-    });
-
-    // S'assurer que le résultat est valide
-    if (Array.isArray(results) && results.length > 0 && results[0].result) {
-      return results[0].result;
-    }
-    return null;
-  } catch (error) {
-    // Erreurs attendues : page PDF, chrome://, page protégée par CSP, etc.
-    console.log(`[PhishGuard] Extraction HTML ignorée pour l'onglet ${tabId} :`, error.message);
-    return null;
-  }
-}
-
-
-// ---------------------------------------------------------------------------
-// Historique local Chrome
+// MAIN PIPELINE
 // ---------------------------------------------------------------------------
 
-/**
- * Sauvegarde un résultat d'analyse dans chrome.storage.local.
- * Ne lève jamais d'erreur pour ne pas perturber le flux principal.
- * @param {Object} result — Résultat d'analyse du backend
- */
-async function saveToLocalHistory(result) {
-  try {
-    const data = await chrome.storage.local.get("phishguard_history");
-    const history = Array.isArray(data.phishguard_history)
-      ? data.phishguard_history
-      : [];
-
-    history.unshift({
-      url: result.url,
-      score: result.score,
-      risk: result.risk,
-      title: result.title || null,
-      analyzed_at: new Date().toISOString(),
-    });
-
-    // Conservation des HISTORY_MAX_SIZE dernières entrées uniquement
-    const trimmed = history.slice(0, HISTORY_MAX_SIZE);
-    await chrome.storage.local.set({ phishguard_history: trimmed });
-    console.log(`[PhishGuard] Historique mis à jour (${trimmed.length} entrées).`);
-  } catch (error) {
-    console.warn("[PhishGuard] Sauvegarde historique échouée :", error.message);
-  }
-}
-
-
-// ---------------------------------------------------------------------------
-// Analyse principale d'un onglet
-// ---------------------------------------------------------------------------
-
-/**
- * Analyse l'onglet spécifié et met à jour le badge.
- * - Vérifie que l'onglet existe avant toute opération.
- * - Ignore les URLs système.
- * - Utilise le cache si le résultat est récent.
- * - Vérifie la santé du backend avant d'appeler l'API.
- * - Ne vide jamais un cache valide en cas d'échec.
- * - Ne fait jamais planter le service worker.
- *
- * @param {number} tabId
- * @param {string} url
- * @param {string|null} title
- */
 async function analyzeTab(tabId, url, title) {
-  // --- Garde-fous URL ---
-  if (isIgnoredUrl(url)) {
-    await resetBadge(tabId);
-    return;
-  }
+  if (isIgnoredUrl(url)) return resetBadge(tabId);
 
-  // --- Vérification que l'onglet existe encore ---
-  const tab = await safeGetTab(tabId);
-  if (!tab) {
-    console.log(`[PhishGuard] Analyse annulée — onglet ${tabId} introuvable.`);
-    return;
-  }
-
-  // --- Vérification du cache mémoire ---
   const cached = analysisCache.get(url);
   if (cached && Date.now() - cached.timestamp < CACHE_DURATION_MS) {
-    console.log(`[PhishGuard] Résultat servi depuis le cache pour : ${url}`);
-    await updateBadge(tabId, cached.result.risk, cached.result.score);
+    return updateBadge(tabId, cached.result.risk, cached.result.score);
+  }
+
+  let parsed;
+  try { parsed = new URL(url); } catch { return; }
+
+  const host = parsed.hostname.toLowerCase();
+
+  // TRUSTED FAST EXIT
+  if (isTrustedDomain(host)) {
+    const result = {
+      url,
+      score: 0,
+      risk: "LOW",
+      reasons: ["Trusted domain"],
+      source: "trusted"
+    };
+
+    cacheResult(url, result);
+    await updateBadge(tabId, "LOW", 0);
     return;
   }
 
-  console.log(`[PhishGuard] Début de l'analyse pour l'onglet ${tabId} : ${url}`);
+  const local = runLocalHeuristics(url);
 
-  // --- Vérification de santé du backend ---
-  const healthy = await isBackendHealthy();
-  if (!healthy) {
-    console.warn("[PhishGuard] Analyse abandonnée — backend inaccessible.");
-    // Ne pas réinitialiser le badge s'il affichait un résultat en cache valide
+  if (local.score < 15) {
+    const result = { url, score: local.score, risk: "LOW", reasons: local.reasons };
+    cacheResult(url, result);
+    return updateBadge(tabId, "LOW", local.score);
+  }
+
+  if (local.score >= 80) {
+    const result = { url, score: local.score, risk: "HIGH", reasons: local.reasons };
+    cacheResult(url, result);
+    updateBadge(tabId, "HIGH", local.score);
     return;
   }
 
   try {
-    // --- Extraction HTML (optionnelle, peut échouer sans conséquence) ---
-    const htmlContent = await extractPageHtml(tabId);
+    const html = await extractHTML(tabId);
+    const backend = await callBackend(url, title, html);
 
-    // --- Re-vérification de l'onglet après l'extraction HTML (peut prendre du temps) ---
-    const tabStillExists = await safeGetTab(tabId);
-    if (!tabStillExists) {
-      console.log(`[PhishGuard] Onglet ${tabId} fermé pendant l'extraction HTML — analyse annulée.`);
-      return;
-    }
-
-    // --- Appel API backend ---
-    const analysisResult = await callAnalyzeAPI(url, title, htmlContent);
-
-    // --- Mise en cache du résultat ---
-    analysisCache.set(url, { result: analysisResult, timestamp: Date.now() });
-
-    // Nettoyage du cache si la limite de taille est atteinte
-    if (analysisCache.size > CACHE_MAX_SIZE) {
-      const oldestKey = analysisCache.keys().next().value;
-      analysisCache.delete(oldestKey);
-      console.log(`[PhishGuard] Cache nettoyé — entrée la plus ancienne supprimée.`);
-    }
-
-    console.log(
-      `[PhishGuard] Analyse terminée — Risque : ${analysisResult.risk}, Score : ${analysisResult.score}/100`
-    );
-
-    // --- Mise à jour du badge ---
-    await updateBadge(tabId, analysisResult.risk, analysisResult.score);
-
-    // --- Sauvegarde dans l'historique local Chrome ---
-    await saveToLocalHistory(analysisResult);
-
-  } catch (error) {
-    // Gestion des différents types d'erreurs sans crash
-    if (error.name === "AbortError") {
-      console.warn(`[PhishGuard] Timeout réseau lors de l'analyse de : ${url}`);
-    } else {
-      console.warn(`[PhishGuard] Erreur lors de l'analyse de ${url} :`, error.message);
-    }
-
-    // IMPORTANT : ne pas réinitialiser le badge si un résultat en cache existe encore
-    const stillCached = analysisCache.get(url);
-    if (!stillCached) {
-      await resetBadge(tabId);
-    } else {
-      console.log("[PhishGuard] Cache précédent conservé malgré l'échec.");
-    }
+    cacheResult(url, backend);
+    updateBadge(tabId, backend.risk, backend.score);
+  } catch {
+    const risk = local.score > 60 ? "HIGH" : "MEDIUM";
+    const result = { url, score: local.score, risk, reasons: local.reasons };
+    cacheResult(url, result);
+    updateBadge(tabId, risk, local.score);
   }
 }
 
+// ---------------------------------------------------------------------------
+// HTML
+// ---------------------------------------------------------------------------
+
+async function extractHTML(tabId) {
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => document.documentElement.outerHTML
+    });
+
+    return res?.[0]?.result?.slice(0, MAX_HTML_LENGTH) || null;
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
-// Écouteurs d'événements Chrome
+// EVENTS
 // ---------------------------------------------------------------------------
 
-/**
- * Analyse automatique lors du changement d'onglet actif.
- * On vérifie que la page est entièrement chargée avant d'analyser.
- */
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.status === "complete" && tab.url) {
+    analyzeTab(tabId, tab.url, tab.title);
+  }
+});
+
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  try {
-    const tab = await safeGetTab(tabId);
-    if (!tab) return;
-
-    if (tab.url && tab.status === "complete") {
-      console.log(`[PhishGuard] Changement d'onglet détecté — analyse de l'onglet ${tabId}.`);
-      await analyzeTab(tabId, tab.url, tab.title);
-    } else {
-      console.log(`[PhishGuard] Onglet ${tabId} ignoré (statut : ${tab.status}).`);
-    }
-  } catch (error) {
-    // Sécurité ultime : ne jamais laisser planter l'écouteur
-    console.warn("[PhishGuard] Erreur dans onActivated :", error.message);
-  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab?.url) analyzeTab(tabId, tab.url, tab.title);
 });
 
-/**
- * Analyse lors de la fin du chargement complet d'une page.
- * Déclenché par status === "complete" uniquement.
- */
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  try {
-    if (changeInfo.status !== "complete") return;
-    if (!tab.url) return;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "ANALYZE_NOW") {
+    analyzeTab(msg.tabId, msg.url, msg.title).then(() => {
+      const cached = analysisCache.get(msg.url);
+      sendResponse({ success: true, result: cached?.result || null });
+    });
+    return true;
+  }
 
-    console.log(`[PhishGuard] Page chargée — analyse de l'onglet ${tabId}.`);
-    await analyzeTab(tabId, tab.url, tab.title);
-  } catch (error) {
-    // Sécurité ultime : ne jamais laisser planter l'écouteur
-    console.warn("[PhishGuard] Erreur dans onUpdated :", error.message);
+  if (msg.type === "GET_CACHED_RESULT") {
+    const cached = analysisCache.get(msg.url);
+    sendResponse({ result: cached?.result || null });
   }
 });
-
-/**
- * Gestion des messages envoyés par le popup ou les content scripts.
- *
- * Messages supportés :
- *  - ANALYZE_NOW        : Force une nouvelle analyse (ignore le cache)
- *  - GET_CACHED_RESULT  : Retourne le résultat en cache pour une URL
- *  - GET_API_URL        : Retourne l'URL du backend configuré
- */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // --- ANALYZE_NOW : Analyse forcée depuis le popup ---
-  if (message.type === "ANALYZE_NOW") {
-    const { tabId, url, title } = message;
-
-    if (!tabId || !url) {
-      sendResponse({ success: false, error: "Paramètres manquants (tabId ou url)." });
-      return false;
-    }
-
-    // Suppression du cache pour forcer une nouvelle analyse
-    analysisCache.delete(url);
-    console.log(`[PhishGuard] Analyse forcée par le popup pour l'onglet ${tabId}.`);
-
-    analyzeTab(tabId, url, title)
-      .then(() => {
-        const cached = analysisCache.get(url);
-        sendResponse({ success: true, result: cached?.result || null });
-      })
-      .catch((error) => {
-        console.warn("[PhishGuard] ANALYZE_NOW échoué :", error.message);
-        sendResponse({ success: false, error: error.message });
-      });
-
-    return true; // Maintient le canal ouvert pour la réponse asynchrone
-  }
-
-  // --- GET_CACHED_RESULT : Lecture du cache pour une URL ---
-  if (message.type === "GET_CACHED_RESULT") {
-    const cached = analysisCache.get(message.url);
-    const isValid = cached && Date.now() - cached.timestamp < CACHE_DURATION_MS;
-    sendResponse({ result: isValid ? cached.result : null });
-    return false;
-  }
-
-  // --- GET_API_URL : Lecture de l'URL du backend ---
-  if (message.type === "GET_API_URL") {
-    sendResponse({ url: API_BASE_URL });
-    return false;
-  }
-});
-
-
-// ---------------------------------------------------------------------------
-// Initialisation
-// ---------------------------------------------------------------------------
-
-/** Journalisation au démarrage du service worker (installation ou rechargement). */
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("[PhishGuard AI] Extension installée et prête.");
-  console.log(`[PhishGuard AI] Backend configuré : ${API_BASE_URL}`);
-});
-
-console.log("[PhishGuard AI] Service worker démarré.");
